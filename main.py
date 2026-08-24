@@ -4,7 +4,6 @@ import time
 from datetime import datetime
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
-from colored import fg, attr
 
 class SpotifyChecker:
     def __init__(self):
