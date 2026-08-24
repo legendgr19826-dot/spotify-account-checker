@@ -1,0 +1,5 @@
+# Add your emails here (one per line)
+# Example:
+# user1@gmail.com
+# user2@yahoo.com
+# user3@outlook.com
